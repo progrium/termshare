@@ -3,11 +3,14 @@ package main
 import (
 	"flag"
 	"io"
-	"net"
+	"log"
+	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 
-	"github.com/dotcloud/docker/term"
+	"code.google.com/p/go.net/websocket"
+	"github.com/heroku/hk/term"
 	"github.com/kr/pty"
 )
 
@@ -16,76 +19,62 @@ var daemon *bool = flag.Bool("d", false, "run server")
 var presenterReader, presenterWriter = io.Pipe()
 var participantReader, participantWriter = io.Pipe()
 
-func runParticipantServer() {
-	listener, err := net.Listen("tcp", ":9000")
-	if err != nil {
-		panic(err)
-	}
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			panic(err)
-		}
-		go handleParticipantServer(conn)
-	}
-}
-
-func runPresenterServer() {
-	listener, err := net.Listen("tcp", ":8000")
-	if err != nil {
-		panic(err)
-	}
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			panic(err)
-		}
-		go handlePresenterServer(conn)
-	}
-}
-
-func handleParticipantServer(conn net.Conn) {
+func participantHandler(ws *websocket.Conn) {
 	eof := make(chan bool, 1)
 	go func() {
-		io.Copy(participantWriter, conn)
+		io.Copy(participantWriter, ws)
 		eof <- true
 	}()
 	go func() {
-		io.Copy(conn, presenterReader)
+		io.Copy(ws, presenterReader)
 		eof <- true
 	}()
 	<-eof
 }
 
-func handlePresenterServer(conn net.Conn) {
+func presenterHandler(ws *websocket.Conn) {
 	eof := make(chan bool, 1)
 	go func() {
-		io.Copy(presenterWriter, conn)
+		io.Copy(presenterWriter, ws)
 		eof <- true
 	}()
 	go func() {
-		io.Copy(conn, participantReader)
+		io.Copy(ws, participantReader)
 		eof <- true
 	}()
 	<-eof
 }
 
 func runPresenter() {
-	conn, err := net.Dial("tcp", "127.0.0.1:8000")
+	conn, err := websocket.Dial("ws://localhost:8080/presenter", "", "http://localhost:8080")
+	if err != nil {
+		panic(err)
+	}
+	cols, err := term.Cols()
+	if err != nil {
+		panic(err)
+	}
+	lines, err := term.Lines()
 	if err != nil {
 		panic(err)
 	}
 	cmd := exec.Command(os.Getenv("SHELL"))
+	cmd.Env = []string{
+		"PS1=[termshare] \\W$ ",
+		"TERM=" + os.Getenv("TERM"),
+		"HOME=" + os.Getenv("HOME"),
+		"USER=" + os.Getenv("USER"),
+		"COLUMNS=" + strconv.Itoa(cols),
+		"LINES=" + strconv.Itoa(lines),
+	}
 	pty, err := pty.Start(cmd)
 	if err != nil {
 		panic(err)
 	}
-	terminalFd := os.Stdin.Fd()
-	oldState, err := term.SetRawTerminal(terminalFd)
-	if err != nil {
+	if err := term.MakeRaw(os.Stdin); err != nil {
 		panic(err)
 	}
-	defer term.RestoreTerminal(terminalFd, oldState)
+	defer term.Restore(os.Stdin)
 	eof := make(chan bool, 1)
 	go func() {
 		io.Copy(io.MultiWriter(os.Stdout, conn), pty)
@@ -103,16 +92,14 @@ func runPresenter() {
 }
 
 func runParticipant(port string) {
-	conn, err := net.Dial("tcp", "127.0.0.1:"+port)
+	conn, err := websocket.Dial("ws://localhost:8080/participant", "", "http://localhost:8080")
 	if err != nil {
 		panic(err)
 	}
-	terminalFd := os.Stdin.Fd()
-	oldState, err := term.SetRawTerminal(terminalFd)
-	if err != nil {
+	if err := term.MakeRaw(os.Stdin); err != nil {
 		panic(err)
 	}
-	defer term.RestoreTerminal(terminalFd, oldState)
+	defer term.Restore(os.Stdin)
 	eof := make(chan bool, 1)
 	go func() {
 		io.Copy(os.Stdout, conn)
@@ -128,8 +115,9 @@ func runParticipant(port string) {
 func main() {
 	flag.Parse()
 	if *daemon {
-		go runPresenterServer()
-		runParticipantServer()
+		http.Handle("/presenter", websocket.Handler(presenterHandler))
+		http.Handle("/participant", websocket.Handler(participantHandler))
+		log.Fatal(http.ListenAndServe(":8080", nil))
 	} else {
 		if flag.Arg(0) == "" {
 			runPresenter()
