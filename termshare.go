@@ -15,6 +15,7 @@ import (
 )
 
 var daemon *bool = flag.Bool("d", false, "run server")
+var presenter *bool = flag.Bool("p", false, "run as presenter")
 
 var presenterReader, presenterWriter = io.Pipe()
 var participantReader, participantWriter = io.Pipe()
@@ -45,8 +46,8 @@ func presenterHandler(ws *websocket.Conn) {
 	<-eof
 }
 
-func runPresenter() {
-	conn, err := websocket.Dial("ws://localhost:8080/presenter", "", "http://localhost:8080")
+func runPresenter(host string) {
+	conn, err := websocket.Dial("ws://"+host+"/presenter", "", "http://"+host)
 	if err != nil {
 		panic(err)
 	}
@@ -91,8 +92,8 @@ func runPresenter() {
 	<-eof
 }
 
-func runParticipant(port string) {
-	conn, err := websocket.Dial("ws://localhost:8080/participant", "", "http://localhost:8080")
+func runParticipant(host string) {
+	conn, err := websocket.Dial("ws://"+host+"/participant", "", "http://"+host)
 	if err != nil {
 		panic(err)
 	}
@@ -117,10 +118,10 @@ func main() {
 	if *daemon {
 		http.Handle("/presenter", websocket.Handler(presenterHandler))
 		http.Handle("/participant", websocket.Handler(participantHandler))
-		log.Fatal(http.ListenAndServe(":8080", nil))
+		log.Fatal(http.ListenAndServe(":"+os.Getenv("PORT"), nil))
 	} else {
-		if flag.Arg(0) == "" {
-			runPresenter()
+		if *presenter {
+			runPresenter(flag.Arg(0))
 		} else {
 			runParticipant(flag.Arg(0))
 		}
