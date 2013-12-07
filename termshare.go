@@ -36,6 +36,19 @@ type session struct {
 	participantR io.ReadCloser
 }
 
+type flushWriter struct {
+	f http.Flusher
+	w io.Writer
+}
+
+func (fw flushWriter) Write(p []byte) (n int, err error) {
+	n, err = fw.w.Write(p)
+	if fw.f != nil {
+		fw.f.Flush()
+	}
+	return
+}
+
 func present() {
 	name, err := uuid.NewV4()
 	if err != nil {
@@ -215,20 +228,35 @@ func main() {
 					w.WriteHeader(http.StatusConflict)
 					return
 				}
-				websocket.Handler(func(ws *websocket.Conn) {
+				if r.Header.Get("Upgrade") == "websocket" {
+					websocket.Handler(func(ws *websocket.Conn) {
+						s.participantW.Write([]byte("\x07")) // ding!
+						eof := make(chan bool, 1)
+						go func() {
+							io.Copy(s.participantW, ws)
+							eof <- true
+						}()
+						go func() {
+							io.Copy(ws, s.presenterR)
+							eof <- true
+						}()
+						log.Println(name + ": participant connected (websocket)")
+						<-eof
+					}).ServeHTTP(w, r)
+				} else {
+					s.participantW.Write([]byte("\x07")) // ding!
+					fw := flushWriter{w: w}
+					if f, ok := w.(http.Flusher); ok {
+						fw.f = f
+					}
 					eof := make(chan bool, 1)
 					go func() {
-						io.Copy(s.participantW, ws)
+						io.Copy(fw, s.presenterR)
 						eof <- true
 					}()
-					go func() {
-						io.Copy(ws, s.presenterR)
-						eof <- true
-					}()
-					s.participantW.Write([]byte("\x07"))
-					log.Println(name + ": participant connected")
+					log.Println(name + ": participant connected (http stream)")
 					<-eof
-				}).ServeHTTP(w, r)
+				}
 			}
 		})
 		log.Println("Termshare server started...")
