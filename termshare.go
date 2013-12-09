@@ -1,18 +1,20 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,17 +25,86 @@ import (
 )
 
 var daemon *bool = flag.Bool("d", false, "run the server daemon")
-var readonly *bool = flag.Bool("r", false, "only allow participants viewing capability")
+var broadcast *bool = flag.Bool("b", false, "only allow readonly viewers and no copilot")
+var private *bool = flag.Bool("p", false, "only allow a copilot and no viewers")
 var server *string = flag.String("s", "young-dusk-7491.herokuapp.com:80", "use a different server")
 
 type session struct {
-	name         string
-	readonly     bool
-	participants []io.ReadWriteCloser
-	presenterW   io.WriteCloser
-	presenterR   io.ReadCloser
-	participantW io.WriteCloser
-	participantR io.ReadCloser
+	Name          string
+	Broadcast     bool
+	Private       bool
+	Viewers       *viewers
+	Pilot         io.ReadWriteCloser
+	Copilot       io.ReadWriteCloser
+	CopilotBuffer *bufferWriter
+	EOF           chan struct{}
+}
+
+type sessions struct {
+	sync.Mutex
+	s map[string]*session
+}
+
+func (s sessions) Get(name string) (sess *session, err error) {
+	s.Lock()
+	defer s.Unlock()
+	sess, found := s.s[name]
+	if !found {
+		err = errors.New("session not found")
+		return
+	}
+	return
+}
+
+func (s sessions) Create(name string, broadcast, private bool) (*session, error) {
+	if sess, _ := s.Get(name); sess != nil {
+		return nil, errors.New("session already exists")
+	}
+	sess := &session{
+		Name:          name,
+		Broadcast:     broadcast,
+		Private:       private,
+		Viewers:       &viewers{v: make(map[io.Writer]struct{})},
+		EOF:           make(chan struct{}),
+		CopilotBuffer: &bufferWriter{},
+	}
+	s.Lock()
+	defer s.Unlock()
+	s.s[name] = sess
+	return sess, nil
+}
+
+func (s sessions) Delete(name string) {
+	s.Lock()
+	defer s.Unlock()
+	delete(s.s, name)
+}
+
+type viewers struct {
+	sync.Mutex
+	v map[io.Writer]struct{}
+}
+
+func (v viewers) Write(data []byte) (n int, err error) {
+	v.Lock()
+	defer v.Unlock()
+	for w := range v.v {
+		n, err = w.Write(data)
+		if err != nil {
+			delete(v.v, w)
+		}
+		if n != len(data) {
+			err = io.ErrShortWrite
+			return
+		}
+	}
+	return len(data), nil
+}
+
+func (v viewers) Add(viewer io.Writer) {
+	v.Lock()
+	defer v.Unlock()
+	v.v[viewer] = struct{}{}
 }
 
 type flushWriter struct {
@@ -49,12 +120,47 @@ func (fw flushWriter) Write(p []byte) (n int, err error) {
 	return
 }
 
-func present() {
+func FlushWriter(writer io.Writer) flushWriter {
+	fw := flushWriter{w: writer}
+	if f, ok := writer.(http.Flusher); ok {
+		fw.f = f
+	}
+	return fw
+}
+
+type bufferWriter struct {
+	w *websocket.Conn
+	b *bytes.Buffer
+}
+
+func (bw *bufferWriter) Write(p []byte) (n int, err error) {
+	if bw.b == nil {
+		bw.b = new(bytes.Buffer)
+	}
+	if bw.b.Len() > 0 && bw.w != nil {
+		if _, err = bw.b.WriteTo(bw.w); err != nil {
+			bw.w = nil
+			err = nil
+		}
+	}
+	if bw.w != nil {
+		n, err = bw.w.Write(p)
+		if err != nil {
+			bw.w = nil
+			return bw.b.Write(p)
+		}
+		return n, err
+	} else {
+		return bw.b.Write(p)
+	}
+}
+
+func share() {
 	name, err := uuid.NewV4()
 	if err != nil {
 		panic(err)
 	}
-	resp, err := http.PostForm("http://"+*server+"/sessions", url.Values{"name": {name.String()}})
+	resp, err := http.Post("http://"+*server+"/"+name.String(), "application/x-www-form-urlencoded", strings.NewReader(""))
 	if err != nil {
 		panic(err)
 	}
@@ -71,7 +177,7 @@ func present() {
 	}
 	fmt.Println(string(body))
 
-	conn, err := websocket.Dial("ws://"+*server+"/"+name.String()+"/presenter", "", "http://"+*server)
+	conn, err := websocket.Dial("ws://"+*server+"/"+name.String(), "", "http://"+*server)
 	if err != nil {
 		panic(err)
 	}
@@ -132,8 +238,8 @@ func present() {
 	<-eof
 }
 
-func participate(name string) {
-	conn, err := websocket.Dial("ws://"+*server+"/"+name, "", "http://"+*server)
+func connect(sessionName string) {
+	conn, err := websocket.Dial("ws://"+*server+"/"+sessionName, "", "http://"+*server)
 	if err != nil {
 		panic(err)
 	}
@@ -160,102 +266,85 @@ func participate(name string) {
 	<-eof
 }
 
+func sessionNameFromRequest(r *http.Request) string {
+	parts := strings.Split(r.RequestURI, "/")
+	return parts[1]
+}
+
+func isWebsocketRequest(r *http.Request) bool {
+	return r.Header.Get("Upgrade") == "websocket"
+}
+
 func main() {
 	flag.Parse()
 
-	// TODO: lock
-	sessions := make(map[string]session)
-
 	if *daemon {
+		sessions := sessions{s: make(map[string]*session)}
+
 		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			switch {
 			case r.RequestURI == "/":
 				http.Redirect(w, r, "http://progrium.viewdocs.io/termshare", 301)
 			case r.RequestURI == "/favicon.ico":
 				return
-			case r.RequestURI == "/sessions" && r.Method == "POST":
-				r.ParseForm()
-				name := r.PostForm.Get("name")
-				_, found := sessions[name]
-				if found {
-					w.WriteHeader(http.StatusConflict)
-					return
-				}
-				s := session{
-					name:     name,
-					readonly: false,
-				}
-				s.presenterR, s.presenterW = io.Pipe()
-				s.participantR, s.participantW = io.Pipe()
-				sessions[name] = s
-				log.Println(name + ": session created")
-				w.Write([]byte("http://termsha.re/" + name + "\n"))
-			case strings.HasSuffix(r.RequestURI, "/presenter"):
-				parts := strings.Split(r.RequestURI, "/")
-				name := parts[1]
-				s, found := sessions[name]
-				if !found {
-					w.WriteHeader(http.StatusNotFound)
-					return
-				}
-				if s.presenterW == nil {
-					w.WriteHeader(http.StatusConflict)
-					return
-				}
-				websocket.Handler(func(ws *websocket.Conn) {
-					eof := make(chan bool, 1)
-					go func() {
-						io.Copy(s.presenterW, ws)
-						eof <- true
-					}()
-					go func() {
-						io.Copy(ws, s.participantR)
-						eof <- true
-					}()
-					log.Println(name + ": presenter connected")
-					<-eof
-					delete(sessions, name)
-				}).ServeHTTP(w, r)
 			default:
-				parts := strings.Split(r.RequestURI, "/")
-				name := parts[1]
-				s, found := sessions[name]
-				if !found {
-					w.WriteHeader(http.StatusNotFound)
+				sessionName := sessionNameFromRequest(r)
+				session, err := sessions.Get(sessionName)
+				if r.Method == "POST" {
+					_, err = sessions.Create(sessionName, false, false)
+					if err != nil {
+						log.Println(err)
+						w.WriteHeader(http.StatusConflict)
+						return
+					}
+					log.Println(sessionName + ": session created")
+					w.Write([]byte("http://termsha.re/" + sessionName + "\n"))
 					return
 				}
-				if s.presenterW == nil {
-					w.WriteHeader(http.StatusConflict)
+				if err != nil {
+					//w.WriteHeader(http.StatusNotFound)
 					return
 				}
-				if r.Header.Get("Upgrade") == "websocket" {
-					websocket.Handler(func(ws *websocket.Conn) {
-						s.participantW.Write([]byte("\x07")) // ding!
-						eof := make(chan bool, 1)
+				switch {
+				case session.Pilot == nil && isWebsocketRequest(r):
+					websocket.Handler(func(conn *websocket.Conn) {
+						session.Pilot = conn
+						log.Println(sessionName + ": pilot connected")
+						_, err := io.Copy(io.MultiWriter(session.Viewers, session.CopilotBuffer), session.Pilot)
+						if err == io.EOF {
+							close(session.EOF)
+						} else {
+							log.Println("pilot writing error: ", err)
+						}
+					}).ServeHTTP(w, r)
+				case session.Pilot != nil && session.Copilot == nil && !session.Broadcast && isWebsocketRequest(r):
+					websocket.Handler(func(conn *websocket.Conn) {
+						session.Copilot = conn
+						session.CopilotBuffer.w = conn
+						session.Pilot.Write([]byte("\x07")) // ding!
+						log.Println(sessionName + ": copilot connected")
+						eof := make(chan struct{})
 						go func() {
-							io.Copy(s.participantW, ws)
-							eof <- true
+							io.Copy(session.Pilot, session.Copilot)
+							session.Copilot = nil
+							session.CopilotBuffer.w = nil
+							eof <- struct{}{}
 						}()
-						go func() {
-							io.Copy(ws, s.presenterR)
-							eof <- true
-						}()
-						log.Println(name + ": participant connected (websocket)")
 						<-eof
 					}).ServeHTTP(w, r)
-				} else {
-					s.participantW.Write([]byte("\x07")) // ding!
-					fw := flushWriter{w: w}
-					if f, ok := w.(http.Flusher); ok {
-						fw.f = f
+				case session.Pilot != nil && !session.Private:
+					if isWebsocketRequest(r) {
+						websocket.Handler(func(conn *websocket.Conn) {
+							session.Viewers.Add(conn)
+							log.Println(sessionName + ": viewer connected (websocket)")
+							<-session.EOF
+						}).ServeHTTP(w, r)
+					} else {
+						// TODO: check for curl, otherwise serve static page with term.js
+						session.Viewers.Add(FlushWriter(w))
+						log.Println(sessionName + ": viewer connected (http stream)")
+						<-session.EOF
 					}
-					eof := make(chan bool, 1)
-					go func() {
-						io.Copy(fw, s.presenterR)
-						eof <- true
-					}()
-					log.Println(name + ": participant connected (http stream)")
-					<-eof
 				}
 			}
 		})
@@ -263,9 +352,9 @@ func main() {
 		log.Fatal(http.ListenAndServe(":"+os.Getenv("PORT"), nil))
 	} else {
 		if flag.Arg(0) == "" {
-			present()
+			share()
 		} else {
-			participate(flag.Arg(0))
+			connect(flag.Arg(0))
 		}
 	}
 }
