@@ -90,12 +90,8 @@ func (v viewers) Write(data []byte) (n int, err error) {
 	defer v.Unlock()
 	for w := range v.v {
 		n, err = w.Write(data)
-		if err != nil {
+		if err != nil || n != len(data) {
 			delete(v.v, w)
-		}
-		if n != len(data) {
-			err = io.ErrShortWrite
-			return
 		}
 	}
 	return len(data), nil
@@ -311,10 +307,12 @@ func main() {
 						session.Pilot = conn
 						log.Println(sessionName + ": pilot connected")
 						_, err := io.Copy(io.MultiWriter(session.Viewers, session.CopilotBuffer), session.Pilot)
-						if err == io.EOF {
-							close(session.EOF)
-						} else {
-							log.Println("pilot writing error: ", err)
+						if err != nil {
+							if err == io.EOF {
+								close(session.EOF)
+							} else {
+								log.Println("pilot writing error: ", err)
+							}
 						}
 					}).ServeHTTP(w, r)
 				case session.Pilot != nil && session.Copilot == nil && !session.Broadcast && isWebsocketRequest(r):
@@ -340,10 +338,14 @@ func main() {
 							<-session.EOF
 						}).ServeHTTP(w, r)
 					} else {
-						// TODO: check for curl, otherwise serve static page with term.js
-						session.Viewers.Add(FlushWriter(w))
-						log.Println(sessionName + ": viewer connected (http stream)")
-						<-session.EOF
+						if strings.HasPrefix(r.Header.Get("User-Agent"), "curl/") {
+							session.Viewers.Add(FlushWriter(w))
+							log.Println(sessionName + ": viewer connected (http stream)")
+							<-session.EOF
+						} else {
+							log.Println(sessionName + ": viewer connected (browser)")
+							http.ServeFile(w, r, "./term.html")
+						}
 					}
 				}
 			}
