@@ -33,6 +33,16 @@ var private *bool = flag.Bool("p", false, "only allow a copilot and no viewers")
 var server *string = flag.String("s", "termsha.re:80", "use a different server to start session")
 var version *bool = flag.Bool("v", false, "print version and exit")
 
+var banner = ` _                          _                    
+| |_ ___ _ __ _ __ ___  ___| |__   __ _ _ __ ___ 
+| __/ _ \ '__| '_ ` + "`" + ` _ \/ __| '_ \ / _` + "`" + ` | '__/ _ \
+| ||  __/ |  | | | | | \__ \ | | | (_| | | |  __/
+ \__\___|_|  |_| |_| |_|___/_| |_|\__,_|_|  \___|
+
+Session URL: {{URL}}
+
+`
+
 func init() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage:  %v [session-url]\n\n", os.Args[0])
@@ -307,7 +317,7 @@ func startDaemon() {
 					return
 				}
 				log.Println(sessionName + ": session created")
-				w.Write([]byte("http://termsha.re/" + sessionName + "\n"))
+				w.Write([]byte(strings.Replace(banner, "{{URL}}", "http://termsha.re/"+sessionName, 1)))
 				return
 			}
 			if err != nil {
