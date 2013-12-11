@@ -261,7 +261,10 @@ func joinSession(sessionUrl string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	conn, err := websocket.Dial("ws://"+url.Host+"/"+url.Path, "", "http://"+url.Host)
+	if !strings.Contains(url.Host, ":") {
+		url.Host = url.Host + ":80"
+	}
+	conn, err := websocket.Dial("ws://"+url.Host+url.Path, "", "http://"+url.Host)
 	if err != nil {
 		log.Fatal(err)
 	}
