@@ -278,10 +278,6 @@ func joinSession(sessionUrl string) {
 	<-eof
 }
 
-func isWebsocketRequest(r *http.Request) bool {
-	return r.Header.Get("Upgrade") == "websocket"
-}
-
 func startDaemon() {
 	sessions := sessions{s: make(map[string]*session)}
 
@@ -291,6 +287,14 @@ func startDaemon() {
 			http.Redirect(w, r, "http://progrium.viewdocs.io/termshare", 301)
 		case r.RequestURI == "/favicon.ico":
 			return
+		case r.RequestURI == "/download":
+			var os string
+			if strings.Contains(r.Header.Get("User-Agent"), "darwin") {
+				os = "Darwin"
+			} else {
+				os = "Linux"
+			}
+			http.Redirect(w, r, "http://github.com/progrium/termshare/releases/download/"+VERSION+"/termshare_"+VERSION+"_"+os+"_x86_64.tgz", 301)
 		default:
 			parts := strings.Split(r.RequestURI, "/")
 			sessionName := parts[1]
@@ -310,8 +314,9 @@ func startDaemon() {
 				//w.WriteHeader(http.StatusNotFound)
 				return
 			}
+			websocket := r.Header.Get("Upgrade") == "websocket"
 			switch {
-			case session.Pilot == nil && isWebsocketRequest(r):
+			case session.Pilot == nil && websocket:
 				websocket.Handler(func(conn *websocket.Conn) {
 					session.Pilot = conn
 					log.Println(sessionName + ": pilot connected")
@@ -324,7 +329,7 @@ func startDaemon() {
 						}
 					}
 				}).ServeHTTP(w, r)
-			case session.Pilot != nil && session.Copilot == nil && !session.Broadcast && isWebsocketRequest(r):
+			case session.Pilot != nil && session.Copilot == nil && !session.Broadcast && websocket:
 				websocket.Handler(func(conn *websocket.Conn) {
 					session.Copilot = conn
 					session.CopilotBuffer.w = conn
@@ -340,7 +345,7 @@ func startDaemon() {
 					<-eof
 				}).ServeHTTP(w, r)
 			case session.Pilot != nil && !session.Private:
-				if isWebsocketRequest(r) {
+				if websocket {
 					websocket.Handler(func(conn *websocket.Conn) {
 						session.Viewers.Add(conn)
 						log.Println(sessionName + ": viewer connected (websocket)")
