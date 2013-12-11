@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -24,10 +25,21 @@ import (
 	"github.com/nu7hatch/gouuid"
 )
 
+const VERSION = "v0.1.0"
+
 var daemon *bool = flag.Bool("d", false, "run the server daemon")
 var broadcast *bool = flag.Bool("b", false, "only allow readonly viewers and no copilot")
 var private *bool = flag.Bool("p", false, "only allow a copilot and no viewers")
-var server *string = flag.String("s", "young-dusk-7491.herokuapp.com:80", "use a different server")
+var server *string = flag.String("s", "termsha.re:80", "use a different server to start session")
+var version *bool = flag.Bool("v", false, "print version and exit")
+
+func init() {
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage:  %v [session-url]\n\n", os.Args[0])
+		fmt.Fprintln(os.Stderr, "Starts termshare sesion or connects to session if session-url is specified\n")
+		flag.PrintDefaults()
+	}
+}
 
 type session struct {
 	Name          string
@@ -151,7 +163,7 @@ func (bw *bufferWriter) Write(p []byte) (n int, err error) {
 	}
 }
 
-func share() {
+func createSession() {
 	name, err := uuid.NewV4()
 	if err != nil {
 		panic(err)
@@ -234,13 +246,17 @@ func share() {
 	<-eof
 }
 
-func connect(sessionName string) {
-	conn, err := websocket.Dial("ws://"+*server+"/"+sessionName, "", "http://"+*server)
+func joinSession(sessionUrl string) {
+	url, err := url.Parse(sessionUrl)
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
+	}
+	conn, err := websocket.Dial("ws://"+url.Host+"/"+url.Path, "", "http://"+url.Host)
+	if err != nil {
+		log.Fatal(err)
 	}
 	if err := term.MakeRaw(os.Stdin); err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 	exitSignal := make(chan os.Signal)
 	signal.Notify(exitSignal, os.Interrupt, syscall.SIGTERM)
@@ -262,101 +278,106 @@ func connect(sessionName string) {
 	<-eof
 }
 
-func sessionNameFromRequest(r *http.Request) string {
-	parts := strings.Split(r.RequestURI, "/")
-	return parts[1]
-}
-
 func isWebsocketRequest(r *http.Request) bool {
 	return r.Header.Get("Upgrade") == "websocket"
+}
+
+func startDaemon() {
+	sessions := sessions{s: make(map[string]*session)}
+
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.RequestURI == "/":
+			http.Redirect(w, r, "http://progrium.viewdocs.io/termshare", 301)
+		case r.RequestURI == "/favicon.ico":
+			return
+		default:
+			parts := strings.Split(r.RequestURI, "/")
+			sessionName := parts[1]
+			session, err := sessions.Get(sessionName)
+			if r.Method == "POST" {
+				_, err = sessions.Create(sessionName, false, false)
+				if err != nil {
+					log.Println(err)
+					w.WriteHeader(http.StatusConflict)
+					return
+				}
+				log.Println(sessionName + ": session created")
+				w.Write([]byte("http://termsha.re/" + sessionName + "\n"))
+				return
+			}
+			if err != nil {
+				//w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			switch {
+			case session.Pilot == nil && isWebsocketRequest(r):
+				websocket.Handler(func(conn *websocket.Conn) {
+					session.Pilot = conn
+					log.Println(sessionName + ": pilot connected")
+					_, err := io.Copy(io.MultiWriter(session.Viewers, session.CopilotBuffer), session.Pilot)
+					if err != nil {
+						if err == io.EOF {
+							close(session.EOF)
+						} else {
+							log.Println("pilot writing error: ", err)
+						}
+					}
+				}).ServeHTTP(w, r)
+			case session.Pilot != nil && session.Copilot == nil && !session.Broadcast && isWebsocketRequest(r):
+				websocket.Handler(func(conn *websocket.Conn) {
+					session.Copilot = conn
+					session.CopilotBuffer.w = conn
+					session.Pilot.Write([]byte("\x07")) // ding!
+					log.Println(sessionName + ": copilot connected")
+					eof := make(chan struct{})
+					go func() {
+						io.Copy(session.Pilot, session.Copilot)
+						session.Copilot = nil
+						session.CopilotBuffer.w = nil
+						eof <- struct{}{}
+					}()
+					<-eof
+				}).ServeHTTP(w, r)
+			case session.Pilot != nil && !session.Private:
+				if isWebsocketRequest(r) {
+					websocket.Handler(func(conn *websocket.Conn) {
+						session.Viewers.Add(conn)
+						log.Println(sessionName + ": viewer connected (websocket)")
+						<-session.EOF
+					}).ServeHTTP(w, r)
+				} else {
+					if strings.HasPrefix(r.Header.Get("User-Agent"), "curl/") {
+						session.Viewers.Add(FlushWriter(w))
+						log.Println(sessionName + ": viewer connected (http stream)")
+						<-session.EOF
+					} else {
+						log.Println(sessionName + ": viewer connected (browser)")
+						http.ServeFile(w, r, "./term.html")
+					}
+				}
+			}
+		}
+	})
+	log.Println("Termshare server started...")
+	log.Fatal(http.ListenAndServe(":"+os.Getenv("PORT"), nil))
 }
 
 func main() {
 	flag.Parse()
 
-	if *daemon {
-		sessions := sessions{s: make(map[string]*session)}
+	if *version {
+		fmt.Println(VERSION)
+		return
+	}
 
-		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			switch {
-			case r.RequestURI == "/":
-				http.Redirect(w, r, "http://progrium.viewdocs.io/termshare", 301)
-			case r.RequestURI == "/favicon.ico":
-				return
-			default:
-				sessionName := sessionNameFromRequest(r)
-				session, err := sessions.Get(sessionName)
-				if r.Method == "POST" {
-					_, err = sessions.Create(sessionName, false, false)
-					if err != nil {
-						log.Println(err)
-						w.WriteHeader(http.StatusConflict)
-						return
-					}
-					log.Println(sessionName + ": session created")
-					w.Write([]byte("http://termsha.re/" + sessionName + "\n"))
-					return
-				}
-				if err != nil {
-					//w.WriteHeader(http.StatusNotFound)
-					return
-				}
-				switch {
-				case session.Pilot == nil && isWebsocketRequest(r):
-					websocket.Handler(func(conn *websocket.Conn) {
-						session.Pilot = conn
-						log.Println(sessionName + ": pilot connected")
-						_, err := io.Copy(io.MultiWriter(session.Viewers, session.CopilotBuffer), session.Pilot)
-						if err != nil {
-							if err == io.EOF {
-								close(session.EOF)
-							} else {
-								log.Println("pilot writing error: ", err)
-							}
-						}
-					}).ServeHTTP(w, r)
-				case session.Pilot != nil && session.Copilot == nil && !session.Broadcast && isWebsocketRequest(r):
-					websocket.Handler(func(conn *websocket.Conn) {
-						session.Copilot = conn
-						session.CopilotBuffer.w = conn
-						session.Pilot.Write([]byte("\x07")) // ding!
-						log.Println(sessionName + ": copilot connected")
-						eof := make(chan struct{})
-						go func() {
-							io.Copy(session.Pilot, session.Copilot)
-							session.Copilot = nil
-							session.CopilotBuffer.w = nil
-							eof <- struct{}{}
-						}()
-						<-eof
-					}).ServeHTTP(w, r)
-				case session.Pilot != nil && !session.Private:
-					if isWebsocketRequest(r) {
-						websocket.Handler(func(conn *websocket.Conn) {
-							session.Viewers.Add(conn)
-							log.Println(sessionName + ": viewer connected (websocket)")
-							<-session.EOF
-						}).ServeHTTP(w, r)
-					} else {
-						if strings.HasPrefix(r.Header.Get("User-Agent"), "curl/") {
-							session.Viewers.Add(FlushWriter(w))
-							log.Println(sessionName + ": viewer connected (http stream)")
-							<-session.EOF
-						} else {
-							log.Println(sessionName + ": viewer connected (browser)")
-							http.ServeFile(w, r, "./term.html")
-						}
-					}
-				}
-			}
-		})
-		log.Println("Termshare server started...")
-		log.Fatal(http.ListenAndServe(":"+os.Getenv("PORT"), nil))
+	if *daemon {
+		startDaemon()
 	} else {
 		if flag.Arg(0) == "" {
-			share()
+			createSession()
 		} else {
-			connect(flag.Arg(0))
+			joinSession(flag.Arg(0))
 		}
 	}
 }
