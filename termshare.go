@@ -314,9 +314,9 @@ func startDaemon() {
 				//w.WriteHeader(http.StatusNotFound)
 				return
 			}
-			websocket := r.Header.Get("Upgrade") == "websocket"
+			isWebsocket := r.Header.Get("Upgrade") == "websocket"
 			switch {
-			case session.Pilot == nil && websocket:
+			case session.Pilot == nil && isWebsocket:
 				websocket.Handler(func(conn *websocket.Conn) {
 					session.Pilot = conn
 					log.Println(sessionName + ": pilot connected")
@@ -329,7 +329,7 @@ func startDaemon() {
 						}
 					}
 				}).ServeHTTP(w, r)
-			case session.Pilot != nil && session.Copilot == nil && !session.Broadcast && websocket:
+			case session.Pilot != nil && session.Copilot == nil && !session.Broadcast && isWebsocket:
 				websocket.Handler(func(conn *websocket.Conn) {
 					session.Copilot = conn
 					session.CopilotBuffer.w = conn
@@ -345,7 +345,7 @@ func startDaemon() {
 					<-eof
 				}).ServeHTTP(w, r)
 			case session.Pilot != nil && !session.Private:
-				if websocket {
+				if isWebsocket {
 					websocket.Handler(func(conn *websocket.Conn) {
 						session.Viewers.Add(conn)
 						log.Println(sessionName + ": viewer connected (websocket)")
