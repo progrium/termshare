@@ -23,7 +23,7 @@ Session URL: http://termsha.re/3b5cc0d7-185f-4568-6e2d-7d6e77f836aa
 ## Install
 
 ```
-curl -sL http://termsha.re/download | tar -C /usr/local/bin -zxf -
+curl -sL https://github.com/progrium/termshare/releases/download/v0.1.0/termshare_v0.1.0_$(uname -s)_$(uname -m).tgz | tar -C /usr/local/bin -zxf -
 ```
 
 ## Usage
