@@ -4,6 +4,22 @@ Quick and easy terminal sharing.
 
 Share interactive control with a copilot and/or a readonly view of your terminal with others. Copilots and viewers can use the client or a web-based terminal.
 
+NOTICE: This tool can already be quite dangerous, but it's also currently NOT using TLS. Use at your own risk...
+
+```
+$ termshare 
+ _                          _                    
+| |_ ___ _ __ _ __ ___  ___| |__   __ _ _ __ ___ 
+| __/ _ \ '__| '_ ` _ \/ __| '_ \ / _` | '__/ _ \
+| ||  __/ |  | | | | | \__ \ | | | (_| | | |  __/
+ \__\___|_|  |_| |_| |_|___/_| |_|\__,_|_|  \___|
+
+Session URL: http://termsha.re/3b5cc0d7-185f-4568-6e2d-7d6e77f836aa
+
+
+[termshare] $
+```
+
 ## Install
 
 ```

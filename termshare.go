@@ -294,7 +294,7 @@ func startDaemon() {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.RequestURI == "/":
-			http.Redirect(w, r, "http://progrium.viewdocs.io/termshare", 301)
+			http.Redirect(w, r, "https://github.com/progrium/termshare", 301)
 		case r.RequestURI == "/favicon.ico":
 			return
 		case r.RequestURI == "/download":
