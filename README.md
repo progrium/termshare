@@ -1,10 +1,10 @@
 # termshare
 
-Quick and easy terminal sharing getting quick help or pair sysadmin'ing. 
+Quick and easy terminal sharing for getting quick help or pair sysadmin'ing. 
 
 Share interactive control with a copilot and/or a readonly view of your terminal with others. Copilots and viewers can use the client or a web-based terminal.
 
-NOTICE: This tool can already be quite dangerous, but it's also currently NOT using TLS. When the [termshare Gittip](https://www.gittip.com/termshare) reaches at least $5/week for 1 month, we'll run the service with SSL.
+The service is run by the support of the community via Gittip donations. [Please donate to keep termshare running and support its maintainers.](https://www.gittip.com/termshare/)
 
 ```
 $ termshare 
