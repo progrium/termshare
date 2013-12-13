@@ -302,13 +302,9 @@ func startDaemon() {
 			http.Redirect(w, r, "https://github.com/progrium/termshare", 301)
 		case r.RequestURI == "/favicon.ico":
 			return
-		case r.RequestURI == "/download":
-			var os string
-			if strings.Contains(r.Header.Get("User-Agent"), "darwin") {
-				os = "Darwin"
-			} else {
-				os = "Linux"
-			}
+		case strings.HasPrefix(r.RequestURI, "/download/"):
+			parts := strings.Split(r.RequestURI, "/")
+			os := parts[len(parts)-1]
 			http.Redirect(w, r, "http://github.com/progrium/termshare/releases/download/"+VERSION+"/termshare_"+VERSION+"_"+os+"_x86_64.tgz", 301)
 		default:
 			parts := strings.Split(r.RequestURI, "/")
@@ -326,7 +322,7 @@ func startDaemon() {
 				return
 			}
 			if err != nil {
-				//w.WriteHeader(http.StatusNotFound)
+				w.WriteHeader(http.StatusNotFound)
 				return
 			}
 			isWebsocket := r.Header.Get("Upgrade") == "websocket"
