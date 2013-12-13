@@ -6,6 +6,8 @@ Share interactive control with a copilot and/or a readonly view of your terminal
 
 NOTICE: This tool can already be quite dangerous, but it's also currently NOT using TLS. Use at your own risk...
 
+<script data-gittip-username="termshare" src="//gttp.co/v1.js"></script>
+
 ```
 $ termshare 
  _                          _                    
