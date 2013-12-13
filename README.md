@@ -1,6 +1,6 @@
 # termshare
 
-Quick and easy terminal sharing. 
+Quick and easy terminal sharing getting quick help or pair sysadmin'ing. 
 
 Share interactive control with a copilot and/or a readonly view of your terminal with others. Copilots and viewers can use the client or a web-based terminal.
 
@@ -15,7 +15,6 @@ $ termshare
  \__\___|_|  |_| |_| |_|___/_| |_|\__,_|_|  \___|
 
 Session URL: http://termsha.re/3b5cc0d7-185f-4568-6e2d-7d6e77f836aa
-
 
 [termshare] $
 ```
@@ -39,3 +38,7 @@ Starts termshare sesion or connects to session if session-url is specified
   -s="termsha.re:80": use a different server to start session
   -v=false: print version and exit
 ```
+
+### License
+
+BSD
