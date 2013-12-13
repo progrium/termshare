@@ -4,9 +4,7 @@ Quick and easy terminal sharing.
 
 Share interactive control with a copilot and/or a readonly view of your terminal with others. Copilots and viewers can use the client or a web-based terminal.
 
-NOTICE: This tool can already be quite dangerous, but it's also currently NOT using TLS. Use at your own risk...
-
-<script data-gittip-username="termshare" src="//gttp.co/v1.js"></script>
+NOTICE: This tool can already be quite dangerous, but it's also currently NOT using TLS. When the [termshare Gittip](https://www.gittip.com/termshare) reaches $5/wk, we'll run the service with SSL.
 
 ```
 $ termshare 
