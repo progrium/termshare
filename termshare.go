@@ -39,7 +39,7 @@ var banner = ` _                          _
 | ||  __/ |  | | | | | \__ \ | | | (_| | | |  __/
  \__\___|_|  |_| |_| |_|___/_| |_|\__,_|_|  \___|
 
-When termshare reaches $5/week on Gittip, it'll be run 100% over SSL.
+Running this open source service supported 100% by community.
 Donate: https://www.gittip.com/termshare
 
 Session URL: {{URL}}
