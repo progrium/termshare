@@ -4,8 +4,7 @@ Quick and easy terminal sharing for getting quick help or pair sysadmin'ing.
 
 Share interactive control with a copilot and/or a readonly view of your terminal with others. Copilots and viewers can use the client or a web-based terminal.
 
-The service is run by the support of the community via Gittip donations. 
-[Please donate to keep termshare running and support the work of the author.](https://www.gittip.com/termshare/)
+The service is run by the support of the community via Gittip donations. [Please donate to keep termshare running and support the work of the author.](https://www.gittip.com/termshare/)
 
 ```
 $ termshare 
@@ -33,8 +32,9 @@ Usage:  termshare [session-url]
 
 Starts termshare sesion or connects to session if session-url is specified
 
-  -b=false: only allow readonly viewers and no copilot
+  -c=false: allow a copilot to join to share control
   -d=false: run the server daemon
+  -n=false: do not use tls endpoints
   -p=false: only allow a copilot and no viewers
   -s="termsha.re:443": use a different server to start session
   -v=false: print version and exit
