@@ -28,9 +28,10 @@ import (
 const VERSION = "v0.1.0"
 
 var daemon *bool = flag.Bool("d", false, "run the server daemon")
-var broadcast *bool = flag.Bool("b", false, "only allow readonly viewers and no copilot")
+var copilot *bool = flag.Bool("c", false, "allow a copilot to join to share control")
 var private *bool = flag.Bool("p", false, "only allow a copilot and no viewers")
-var server *string = flag.String("s", "termsha.re:80", "use a different server to start session")
+var server *string = flag.String("s", "termsha.re:443", "use a different server to start session")
+var tls *bool = flag.Bool("t", false, "use tls endpoints")
 var version *bool = flag.Bool("v", false, "print version and exit")
 
 var banner = ` _                          _                    
@@ -55,7 +56,7 @@ func init() {
 
 type session struct {
 	Name          string
-	Broadcast     bool
+	AllowCopilot  bool
 	Private       bool
 	Viewers       *viewers
 	Pilot         io.ReadWriteCloser
@@ -80,13 +81,13 @@ func (s sessions) Get(name string) (sess *session, err error) {
 	return
 }
 
-func (s sessions) Create(name string, broadcast, private bool) (*session, error) {
+func (s sessions) Create(name string, copilot, private bool) (*session, error) {
 	if sess, _ := s.Get(name); sess != nil {
 		return nil, errors.New("session already exists")
 	}
 	sess := &session{
 		Name:          name,
-		Broadcast:     broadcast,
+		AllowCopilot:  copilot,
 		Private:       private,
 		Viewers:       &viewers{v: make(map[io.Writer]struct{})},
 		EOF:           make(chan struct{}),
@@ -176,11 +177,24 @@ func (bw *bufferWriter) Write(p []byte) (n int, err error) {
 }
 
 func createSession() {
+	var httpProtocol, wsProtocol string
+	if *tls {
+		httpProtocol = "https"
+		wsProtocol = "wss"
+	} else {
+		httpProtocol = "http"
+		wsProtocol = "ws"
+	}
 	name, err := uuid.NewV4()
 	if err != nil {
 		panic(err)
 	}
-	resp, err := http.Post("http://"+*server+"/"+name.String(), "application/x-www-form-urlencoded", strings.NewReader(""))
+	values := map[bool]string{
+		true:  "true",
+		false: "",
+	}
+	resp, err := http.PostForm(httpProtocol+"://"+*server+"/"+name.String(),
+		url.Values{"copilot": {values[*copilot]}, "private": {values[*private]}})
 	if err != nil {
 		panic(err)
 	}
@@ -197,7 +211,7 @@ func createSession() {
 	}
 	fmt.Println(string(body))
 
-	conn, err := websocket.Dial("ws://"+*server+"/"+name.String(), "", "http://"+*server)
+	conn, err := websocket.Dial(wsProtocol+"://"+*server+"/"+name.String(), "", httpProtocol+"://"+*server)
 	if err != nil {
 		panic(err)
 	}
@@ -259,14 +273,24 @@ func createSession() {
 }
 
 func joinSession(sessionUrl string) {
+	var httpProtocol, wsProtocol, defaultPort string
+	if *tls {
+		httpProtocol = "https"
+		wsProtocol = "wss"
+		defaultPort = ":443"
+	} else {
+		httpProtocol = "http"
+		wsProtocol = "ws"
+		defaultPort = ":80"
+	}
 	url, err := url.Parse(sessionUrl)
 	if err != nil {
 		log.Fatal(err)
 	}
 	if !strings.Contains(url.Host, ":") {
-		url.Host = url.Host + ":80"
+		url.Host = url.Host + defaultPort
 	}
-	conn, err := websocket.Dial("ws://"+url.Host+url.Path, "", "http://"+url.Host)
+	conn, err := websocket.Dial(wsProtocol+"://"+url.Host+url.Path, "", httpProtocol+"://"+url.Host)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -305,20 +329,34 @@ func startDaemon() {
 		case strings.HasPrefix(r.RequestURI, "/download/"):
 			parts := strings.Split(r.RequestURI, "/")
 			os := parts[len(parts)-1]
-			http.Redirect(w, r, "http://github.com/progrium/termshare/releases/download/"+VERSION+"/termshare_"+VERSION+"_"+os+"_x86_64.tgz", 301)
+			http.Redirect(w, r, "https://github.com/progrium/termshare/releases/download/"+VERSION+"/termshare_"+VERSION+"_"+os+"_x86_64.tgz", 301)
 		default:
 			parts := strings.Split(r.RequestURI, "/")
 			sessionName := parts[1]
 			session, err := sessions.Get(sessionName)
 			if r.Method == "POST" {
-				_, err = sessions.Create(sessionName, false, false)
+				r.ParseForm()
+				_, err = sessions.Create(sessionName, r.Form.Get("copilot") != "", r.Form.Get("private") != "")
 				if err != nil {
 					log.Println(err)
 					w.WriteHeader(http.StatusConflict)
 					return
 				}
-				log.Println(sessionName + ": session created")
-				w.Write([]byte(strings.Replace(banner, "{{URL}}", "http://termsha.re/"+sessionName, 1)))
+				logline := sessionName + ": session created"
+				if r.Form.Get("copilot") != "" {
+					logline = logline + " [copilot]"
+				}
+				if r.Form.Get("private") != "" {
+					logline = logline + " [private]"
+				}
+				log.Println(logline)
+				var httpProtocol string
+				if *tls {
+					httpProtocol = "https"
+				} else {
+					httpProtocol = "http"
+				}
+				w.Write([]byte(strings.Replace(banner, "{{URL}}", httpProtocol+"://termsha.re/"+sessionName, 1)))
 				return
 			}
 			if err != nil {
@@ -340,7 +378,7 @@ func startDaemon() {
 						}
 					}
 				}).ServeHTTP(w, r)
-			case session.Pilot != nil && session.Copilot == nil && !session.Broadcast && isWebsocket:
+			case session.Pilot != nil && session.Copilot == nil && session.AllowCopilot && isWebsocket:
 				websocket.Handler(func(conn *websocket.Conn) {
 					session.Copilot = conn
 					session.CopilotBuffer.w = conn
@@ -359,24 +397,25 @@ func startDaemon() {
 				if isWebsocket {
 					websocket.Handler(func(conn *websocket.Conn) {
 						session.Viewers.Add(conn)
-						log.Println(sessionName + ": viewer connected (websocket)")
+						log.Println(sessionName + ": viewer connected [websocket]")
 						<-session.EOF
 					}).ServeHTTP(w, r)
 				} else {
 					if strings.HasPrefix(r.Header.Get("User-Agent"), "curl/") {
 						session.Viewers.Add(FlushWriter(w))
-						log.Println(sessionName + ": viewer connected (http stream)")
+						log.Println(sessionName + ": viewer connected [http]")
 						<-session.EOF
 					} else {
-						log.Println(sessionName + ": viewer connected (browser)")
+						log.Println(sessionName + ": viewer connected [browser]")
 						http.ServeFile(w, r, "./term.html")
 					}
 				}
 			}
 		}
 	})
-	log.Println("Termshare server started...")
-	log.Fatal(http.ListenAndServe(":"+os.Getenv("PORT"), nil))
+	port := ":" + os.Getenv("PORT")
+	log.Println("Termshare server started on " + port + "...")
+	log.Fatal(http.ListenAndServe(port, nil))
 }
 
 func main() {

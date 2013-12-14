@@ -6,7 +6,8 @@
 <script>
 ;(function() {
   window.onload = function() {
-    var socket = new WebSocket("ws://"+location.host+location.pathname);
+    var protocol = (location.protocol == "https:") ? "wss" : "ws"
+    var socket = new WebSocket(protocol+"://"+location.host+location.pathname);
     socket.onopen = function() {
       var term = new Terminal({
         cols: 100,
