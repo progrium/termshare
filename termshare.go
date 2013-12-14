@@ -31,7 +31,7 @@ var daemon *bool = flag.Bool("d", false, "run the server daemon")
 var copilot *bool = flag.Bool("c", false, "allow a copilot to join to share control")
 var private *bool = flag.Bool("p", false, "only allow a copilot and no viewers")
 var server *string = flag.String("s", "termsha.re:443", "use a different server to start session")
-var tls *bool = flag.Bool("t", false, "use tls endpoints")
+var notls *bool = flag.Bool("n", false, "do not use tls endpoints")
 var version *bool = flag.Bool("v", false, "print version and exit")
 
 var banner = ` _                          _                    
@@ -178,12 +178,12 @@ func (bw *bufferWriter) Write(p []byte) (n int, err error) {
 
 func createSession() {
 	var httpProtocol, wsProtocol string
-	if *tls {
-		httpProtocol = "https"
-		wsProtocol = "wss"
-	} else {
+	if *notls {
 		httpProtocol = "http"
 		wsProtocol = "ws"
+	} else {
+		httpProtocol = "https"
+		wsProtocol = "wss"
 	}
 	name, err := uuid.NewV4()
 	if err != nil {
@@ -274,14 +274,14 @@ func createSession() {
 
 func joinSession(sessionUrl string) {
 	var httpProtocol, wsProtocol, defaultPort string
-	if *tls {
-		httpProtocol = "https"
-		wsProtocol = "wss"
-		defaultPort = ":443"
-	} else {
+	if *notls {
 		httpProtocol = "http"
 		wsProtocol = "ws"
 		defaultPort = ":80"
+	} else {
+		httpProtocol = "https"
+		wsProtocol = "wss"
+		defaultPort = ":443"
 	}
 	url, err := url.Parse(sessionUrl)
 	if err != nil {
@@ -351,10 +351,10 @@ func startDaemon() {
 				}
 				log.Println(logline)
 				var httpProtocol string
-				if *tls {
-					httpProtocol = "https"
-				} else {
+				if *notls {
 					httpProtocol = "http"
+				} else {
+					httpProtocol = "https"
 				}
 				w.Write([]byte(strings.Replace(banner, "{{URL}}", httpProtocol+"://termsha.re/"+sessionName, 1)))
 				return
