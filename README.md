@@ -40,6 +40,20 @@ Starts termshare sesion or connects to session if session-url is specified
   -v=false: print version and exit
 ```
 
+## Running the Termshare Server Locally
+
+The Termshare server is meant to be run on Heroku, but you can also run it locally. There are just a few tricky bits. Run the server like this:
+
+	$ PORT=8080 termshare -d -n -s localhost:8080
+
+Now when creating a session, you not only need to specify to use the local server, but you need to pass `-n` otherwise it will try to connect with TLS, which is only available via Heroku.
+
+	$ termshare -n -s localhost:8080
+
+The Session URL it gives you should be accurate, but if you use it with termshare you do still need to pass `-n`. For example:
+
+	$ termshare -n http://localhost:8080/43aa4bd7-6583-41aa-446d-dc32fcceba2e
+
 ### License
 
 BSD

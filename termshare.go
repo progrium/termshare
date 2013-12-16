@@ -25,7 +25,7 @@ import (
 	"github.com/nu7hatch/gouuid"
 )
 
-const VERSION = "v0.1.0"
+const VERSION = "v0.1.1"
 
 var daemon *bool = flag.Bool("d", false, "run the server daemon")
 var copilot *bool = flag.Bool("c", false, "allow a copilot to join to share control")
@@ -176,15 +176,27 @@ func (bw *bufferWriter) Write(p []byte) (n int, err error) {
 	}
 }
 
-func createSession() {
-	var httpProtocol, wsProtocol string
-	if *notls {
-		httpProtocol = "http"
-		wsProtocol = "ws"
+func readResponse(resp *http.Response) (string, error) {
+	defer resp.Body.Close()
+	if resp.StatusCode == 200 {
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return "", err
+		}
+		return string(body), nil
 	} else {
-		httpProtocol = "https"
-		wsProtocol = "wss"
+		return "", errors.New("unexpected status: " + string(resp.StatusCode))
 	}
+}
+
+func baseUrl(protocol string) string {
+	if !*notls {
+		protocol = protocol + "s"
+	}
+	return protocol + "://" + *server
+}
+
+func createSession() {
 	name, err := uuid.NewV4()
 	if err != nil {
 		panic(err)
@@ -193,25 +205,18 @@ func createSession() {
 		true:  "true",
 		false: "",
 	}
-	resp, err := http.PostForm(httpProtocol+"://"+*server+"/"+name.String(),
+	resp, err := http.PostForm(baseUrl("http")+"/"+name.String(),
 		url.Values{"copilot": {values[*copilot]}, "private": {values[*private]}})
 	if err != nil {
 		panic(err)
 	}
-	var body []byte
-	if resp.StatusCode == 200 {
-		body, err = ioutil.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			panic(err)
-		}
-	} else {
-		resp.Body.Close()
+	body, err := readResponse(resp)
+	if err != nil {
 		log.Fatal("unable to open session")
 	}
-	fmt.Println(string(body))
+	fmt.Println(body)
 
-	conn, err := websocket.Dial(wsProtocol+"://"+*server+"/"+name.String(), "", httpProtocol+"://"+*server)
+	conn, err := websocket.Dial(baseUrl("ws")+"/"+name.String(), "", baseUrl("http"))
 	if err != nil {
 		panic(err)
 	}
@@ -273,24 +278,20 @@ func createSession() {
 }
 
 func joinSession(sessionUrl string) {
-	var httpProtocol, wsProtocol, defaultPort string
-	if *notls {
-		httpProtocol = "http"
-		wsProtocol = "ws"
-		defaultPort = ":80"
-	} else {
-		httpProtocol = "https"
-		wsProtocol = "wss"
-		defaultPort = ":443"
-	}
 	url, err := url.Parse(sessionUrl)
 	if err != nil {
 		log.Fatal(err)
 	}
 	if !strings.Contains(url.Host, ":") {
-		url.Host = url.Host + defaultPort
+		if *notls {
+			*server = url.Host + ":80"
+		} else {
+			*server = url.Host + ":443"
+		}
+	} else {
+		*server = url.Host
 	}
-	conn, err := websocket.Dial(wsProtocol+"://"+url.Host+url.Path, "", httpProtocol+"://"+url.Host)
+	conn, err := websocket.Dial(baseUrl("ws")+url.Path, "", baseUrl("http"))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -326,6 +327,8 @@ func startDaemon() {
 			http.Redirect(w, r, "https://github.com/progrium/termshare", 301)
 		case r.RequestURI == "/favicon.ico":
 			return
+		case r.RequestURI == "/version":
+			w.Write([]byte(VERSION))
 		case strings.HasPrefix(r.RequestURI, "/download/"):
 			parts := strings.Split(r.RequestURI, "/")
 			os := parts[len(parts)-1]
@@ -350,13 +353,10 @@ func startDaemon() {
 					logline = logline + " [private]"
 				}
 				log.Println(logline)
-				var httpProtocol string
-				if *notls {
-					httpProtocol = "http"
-				} else {
-					httpProtocol = "https"
-				}
-				w.Write([]byte(strings.Replace(banner, "{{URL}}", httpProtocol+"://termsha.re/"+sessionName, 1)))
+				baseUrl := baseUrl("http")
+				baseUrl = strings.TrimSuffix(baseUrl, ":443")
+				baseUrl = strings.TrimSuffix(baseUrl, ":80")
+				w.Write([]byte(strings.Replace(banner, "{{URL}}", baseUrl+"/"+sessionName, 1)))
 				return
 			}
 			if err != nil {
@@ -407,7 +407,7 @@ func startDaemon() {
 						<-session.EOF
 					} else {
 						log.Println(sessionName + ": viewer connected [browser]")
-						http.ServeFile(w, r, "./term.html")
+						w.Write(term_html())
 					}
 				}
 			}

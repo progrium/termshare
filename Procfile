@@ -1,1 +1,1 @@
-web: termshare -d
+web: termshare -d -s termsha.re:443
