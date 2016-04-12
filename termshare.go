@@ -19,7 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	"code.google.com/p/go.net/websocket"
+	"golang.org/x/net/websocket"
 	"github.com/heroku/hk/term"
 	"github.com/kr/pty"
 	"github.com/nu7hatch/gouuid"
