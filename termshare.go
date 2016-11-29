@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -32,6 +33,7 @@ var copilot *bool = flag.Bool("c", false, "allow a copilot to join to share cont
 var private *bool = flag.Bool("p", false, "only allow a copilot and no viewers")
 var server *string = flag.String("s", "termsha.re:443", "use a different server to start session")
 var notls *bool = flag.Bool("n", false, "do not use tls endpoints")
+var tlsverify *bool = flag.Bool("t", true, "do not verify tls certs")
 var version *bool = flag.Bool("v", false, "print version and exit")
 
 var banner = ` _                          _                    
@@ -205,6 +207,14 @@ func createSession() {
 		true:  "true",
 		false: "",
 	}
+
+	cfg := &tls.Config{
+		InsecureSkipVerify: !*tlsverify,
+	}
+	http.DefaultClient.Transport = &http.Transport{
+		TLSClientConfig: cfg,
+	}
+
 	resp, err := http.PostForm(baseUrl("http")+"/"+name.String(),
 		url.Values{"copilot": {values[*copilot]}, "private": {values[*private]}})
 	if err != nil {
@@ -216,7 +226,14 @@ func createSession() {
 	}
 	fmt.Println(body)
 
-	conn, err := websocket.Dial(baseUrl("ws")+"/"+name.String(), "", baseUrl("http"))
+	wsconf, err := websocket.NewConfig(baseUrl("ws")+"/"+name.String(), baseUrl("http"))
+	if err != nil {
+		panic(err)
+	}
+
+	wsconf.TlsConfig = cfg
+
+	conn, err := websocket.DialConfig(wsconf)
 	if err != nil {
 		panic(err)
 	}
