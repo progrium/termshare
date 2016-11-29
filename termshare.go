@@ -244,12 +244,20 @@ func createSession() {
 	if err := term.MakeRaw(os.Stdin); err != nil {
 		panic(err)
 	}
+	exitAllowed := false
 	exitSignal := make(chan os.Signal)
 	signal.Notify(exitSignal, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-exitSignal
-		term.Restore(os.Stdin)
-		os.Exit(0)
+		if exitAllowed {
+			term.Restore(os.Stdin)
+			os.Exit(0)
+		}
+		exitAllowed = true
+		time.AfterFunc(500*time.Millisecond, func() {
+			exitAllowed = false
+		})
+
 	}()
 	defer term.Restore(os.Stdin)
 	eof := make(chan bool, 1)
