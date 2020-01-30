@@ -1,0 +1,12 @@
+# github.com/creack/pty v1.1.9
+github.com/creack/pty
+# github.com/google/uuid v1.1.1
+github.com/google/uuid
+# github.com/heroku/hk v0.0.0-20160226172041-9c27ee3bfe9f
+github.com/heroku/hk/term
+# golang.org/x/sys v0.0.0-20200124204421-9fbb57f87de9
+golang.org/x/sys/unix
+# nhooyr.io/websocket v1.7.4
+nhooyr.io/websocket
+nhooyr.io/websocket/internal/bpool
+nhooyr.io/websocket/internal/wsjs

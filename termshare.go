@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -19,13 +21,14 @@ import (
 	"syscall"
 	"time"
 
-	"code.google.com/p/go.net/websocket"
+	"nhooyr.io/websocket"
 	"github.com/heroku/hk/term"
-	"github.com/kr/pty"
-	"github.com/nu7hatch/gouuid"
+	"github.com/creack/pty"
+	"github.com/google/uuid"
 )
 
-const VERSION = "v0.2.0"
+const VERSION = "v0.3.0"
+const msgType = websocket.MessageText
 
 var daemon *bool = flag.Bool("d", false, "run the server daemon")
 var copilot *bool = flag.Bool("c", false, "allow a copilot to join to share control")
@@ -150,11 +153,15 @@ func FlushWriter(writer io.Writer) flushWriter {
 }
 
 type bufferWriter struct {
-	w *websocket.Conn
+	w net.Conn
 	b *bytes.Buffer
 }
 
 func (bw *bufferWriter) Write(p []byte) (n int, err error) {
+	//defer func() {
+	//	log.Printf("bufferWriter.Write() n(%d) err(%v) %s", n, err, p[:n])
+	//}()
+
 	if bw.b == nil {
 		bw.b = new(bytes.Buffer)
 	}
@@ -163,10 +170,12 @@ func (bw *bufferWriter) Write(p []byte) (n int, err error) {
 			bw.w = nil
 			err = nil
 		}
+		if bw.w != nil {
+			_ = bw.w.Close()
+		}
 	}
 	if bw.w != nil {
-		n, err = bw.w.Write(p)
-		if err != nil {
+		if n, err = bw.w.Write(p); err != nil {
 			bw.w = nil
 			return bw.b.Write(p)
 		}
@@ -177,7 +186,7 @@ func (bw *bufferWriter) Write(p []byte) (n int, err error) {
 }
 
 func readResponse(resp *http.Response) (string, error) {
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == 200 {
 		body, err := ioutil.ReadAll(resp.Body)
 		if err != nil {
@@ -197,7 +206,9 @@ func baseUrl(protocol string) string {
 }
 
 func createSession() {
-	name, err := uuid.NewV4()
+	ctx := context.Background()
+
+	name, err := uuid.NewRandom()
 	if err != nil {
 		panic(err)
 	}
@@ -216,10 +227,12 @@ func createSession() {
 	}
 	fmt.Println(body)
 
-	conn, err := websocket.Dial(baseUrl("ws")+"/"+name.String(), "", baseUrl("http"))
+	wsConn, _, err := websocket.Dial(ctx, baseUrl("ws")+"/"+name.String(), nil)
 	if err != nil {
 		panic(err)
 	}
+	conn := websocket.NetConn(ctx, wsConn, msgType)
+
 	cols, err := term.Cols()
 	if err != nil {
 		panic(err)
@@ -237,7 +250,7 @@ func createSession() {
 		"COLUMNS=" + strconv.Itoa(cols),
 		"LINES=" + strconv.Itoa(lines),
 	}
-	pty, err := pty.Start(cmd)
+	ptyF, err := pty.Start(cmd)
 	if err != nil {
 		panic(err)
 	}
@@ -254,21 +267,20 @@ func createSession() {
 	defer term.Restore(os.Stdin)
 	eof := make(chan bool, 1)
 	go func() {
-		io.Copy(io.MultiWriter(os.Stdout, conn), pty)
+		io.Copy(io.MultiWriter(os.Stdout, conn), ptyF)
 		eof <- true
 	}()
 	go func() {
-		io.Copy(pty, os.Stdin)
+		io.Copy(ptyF, os.Stdin)
 		eof <- true
 	}()
 	go func() {
-		io.Copy(pty, conn)
+		Copy(ptyF, conn)
 		eof <- true
 	}()
 	go func() {
 		for {
-			_, err := conn.Write([]byte("\x00"))
-			if err != nil {
+			if _, err := conn.Write([]byte("\x00")); err != nil {
 				return
 			}
 			time.Sleep(10 * time.Second)
@@ -277,24 +289,97 @@ func createSession() {
 	<-eof
 }
 
+// Copy copies from src to dst until either EOF is reached
+// on src or an error occurs. It returns the number of bytes
+// copied and the first error encountered while copying, if any.
+//
+// A successful Copy returns err == nil, not err == EOF.
+// Because Copy is defined to read from src until EOF, it does
+// not treat an EOF from Read as an error to be reported.
+//
+// If src implements the WriterTo interface,
+// the copy is implemented by calling src.WriteTo(dst).
+// Otherwise, if dst implements the ReaderFrom interface,
+// the copy is implemented by calling dst.ReadFrom(src).
+func Copy(dst io.Writer, src io.Reader) (written int64, err error) {
+	return copyBuffer(dst, src, nil)
+}
+
+// copyBuffer is the actual implementation of Copy and CopyBuffer.
+// if buf is nil, one is allocated.
+func copyBuffer(dst io.Writer, src io.Reader, buf []byte) (written int64, err error) {
+	log.Printf("copyBuffer: start...")
+	// If the reader has a WriteTo method, use it to do the copy.
+	// Avoids an allocation and a copy.
+	if wt, ok := src.(io.WriterTo); ok {
+		return wt.WriteTo(dst)
+	}
+	// Similarly, if the writer has a ReadFrom method, use it to do the copy.
+	if rt, ok := dst.(io.ReaderFrom); ok {
+		return rt.ReadFrom(src)
+	}
+	if buf == nil {
+		size := 10// 32 * 1024
+		if l, ok := src.(*io.LimitedReader); ok && int64(size) > l.N {
+			if l.N < 1 {
+				size = 1
+			} else {
+				size = int(l.N)
+			}
+		}
+		buf = make([]byte, size)
+	}
+	for {
+		log.Printf("copyBuffer: start read...")
+		nr, er := src.Read(buf)
+		log.Printf("copyBuffer(src.Read) n(%d) err(%v) %s", nr, er, buf[0:nr])
+		if nr > 0 {
+			nw, ew := dst.Write(buf[0:nr])
+			log.Printf("copyBuffer(dst.Write) n(%d) err(%v) %s", nw, ew, buf[0:nw])
+			if nw > 0 {
+				written += int64(nw)
+			}
+			if ew != nil {
+				err = ew
+				break
+			}
+			if nr != nw {
+				err = io.ErrShortWrite
+				break
+			}
+		}
+		if er != nil {
+			if er != io.EOF {
+				err = er
+			}
+			break
+		}
+	}
+	return written, err
+}
+
 func joinSession(sessionUrl string) {
-	url, err := url.Parse(sessionUrl)
+	ctx := context.Background()
+
+	pUrl, err := url.Parse(sessionUrl)
 	if err != nil {
 		log.Fatal(err)
 	}
-	if !strings.Contains(url.Host, ":") {
+	if !strings.Contains(pUrl.Host, ":") {
 		if *notls {
-			*server = url.Host + ":80"
+			*server = pUrl.Host + ":80"
 		} else {
-			*server = url.Host + ":443"
+			*server = pUrl.Host + ":443"
 		}
 	} else {
-		*server = url.Host
+		*server = pUrl.Host
 	}
-	conn, err := websocket.Dial(baseUrl("ws")+url.Path, "", baseUrl("http"))
+	wsConn, _, err := websocket.Dial(ctx, baseUrl("ws")+pUrl.Path, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
+	conn := websocket.NetConn(ctx, wsConn, msgType)
+
 	if err := term.MakeRaw(os.Stdin); err != nil {
 		log.Fatal(err)
 	}
@@ -336,10 +421,10 @@ func startDaemon() {
 		default:
 			parts := strings.Split(r.RequestURI, "/")
 			sessionName := parts[1]
-			session, err := sessions.Get(sessionName)
+
 			if r.Method == "POST" {
 				r.ParseForm()
-				_, err = sessions.Create(sessionName, r.Form.Get("copilot") != "", r.Form.Get("private") != "")
+				_, err := sessions.Create(sessionName, r.Form.Get("copilot") != "", r.Form.Get("private") != "")
 				if err != nil {
 					log.Println(err)
 					w.WriteHeader(http.StatusConflict)
@@ -359,6 +444,8 @@ func startDaemon() {
 				w.Write([]byte(strings.Replace(banner, "{{URL}}", baseUrl+"/"+sessionName, 1)))
 				return
 			}
+
+			session, err := sessions.Get(sessionName)
 			if err != nil {
 				w.WriteHeader(http.StatusNotFound)
 				return
@@ -366,11 +453,16 @@ func startDaemon() {
 			isWebsocket := r.Header.Get("Upgrade") == "websocket"
 			switch {
 			case session.Pilot == nil && isWebsocket:
-				websocket.Handler(func(conn *websocket.Conn) {
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					wsConn, err := websocket.Accept(w, r, nil)
+					if err != nil {
+						return
+					}
+					conn := websocket.NetConn(r.Context(), wsConn, msgType)
+
 					session.Pilot = conn
 					log.Println(sessionName + ": pilot connected")
-					_, err := io.Copy(io.MultiWriter(session.Viewers, session.CopilotBuffer), session.Pilot)
-					if err != nil {
+					if _, err := io.Copy(io.MultiWriter(session.Viewers, session.CopilotBuffer), session.Pilot); err != nil {
 						if err == io.EOF {
 							close(session.EOF)
 						} else {
@@ -378,8 +470,15 @@ func startDaemon() {
 						}
 					}
 				}).ServeHTTP(w, r)
+
 			case session.Pilot != nil && session.Copilot == nil && session.AllowCopilot && isWebsocket:
-				websocket.Handler(func(conn *websocket.Conn) {
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					wsConn, err := websocket.Accept(w, r, nil)
+					if err != nil {
+						return
+					}
+					conn := websocket.NetConn(r.Context(), wsConn, msgType)
+
 					session.Copilot = conn
 					session.CopilotBuffer.w = conn
 					session.Pilot.Write([]byte("\x07")) // ding!
@@ -393,9 +492,16 @@ func startDaemon() {
 					}()
 					<-eof
 				}).ServeHTTP(w, r)
+
 			case session.Pilot != nil && !session.Private:
 				if isWebsocket {
-					websocket.Handler(func(conn *websocket.Conn) {
+					http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						wsConn, err := websocket.Accept(w, r, nil)
+						if err != nil {
+							return
+						}
+						conn := websocket.NetConn(r.Context(), wsConn, msgType)
+
 						session.Viewers.Add(conn)
 						log.Println(sessionName + ": viewer connected [websocket]")
 						<-session.EOF
