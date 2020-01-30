@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -19,13 +21,14 @@ import (
 	"syscall"
 	"time"
 
-	"code.google.com/p/go.net/websocket"
+	"nhooyr.io/websocket"
 	"github.com/heroku/hk/term"
-	"github.com/kr/pty"
-	"github.com/nu7hatch/gouuid"
+	"github.com/creack/pty"
+	"github.com/google/uuid"
 )
 
-const VERSION = "v0.2.0"
+const VERSION = "v0.3.0"
+const msgType = websocket.MessageText
 
 var daemon *bool = flag.Bool("d", false, "run the server daemon")
 var copilot *bool = flag.Bool("c", false, "allow a copilot to join to share control")
@@ -150,11 +153,15 @@ func FlushWriter(writer io.Writer) flushWriter {
 }
 
 type bufferWriter struct {
-	w *websocket.Conn
+	w net.Conn
 	b *bytes.Buffer
 }
 
 func (bw *bufferWriter) Write(p []byte) (n int, err error) {
+	defer func() {
+		log.Printf("bufferWriter.Write() n(%d) err(%v) %s", n, err, p[:n])
+	}()
+
 	if bw.b == nil {
 		bw.b = new(bytes.Buffer)
 	}
@@ -163,13 +170,16 @@ func (bw *bufferWriter) Write(p []byte) (n int, err error) {
 			bw.w = nil
 			err = nil
 		}
+		if bw.w != nil {
+			_ = bw.w.Close()
+		}
 	}
 	if bw.w != nil {
-		n, err = bw.w.Write(p)
-		if err != nil {
+		if n, err = bw.w.Write(p); err != nil {
 			bw.w = nil
 			return bw.b.Write(p)
 		}
+		n = len(p)
 		return n, err
 	} else {
 		return bw.b.Write(p)
@@ -177,7 +187,7 @@ func (bw *bufferWriter) Write(p []byte) (n int, err error) {
 }
 
 func readResponse(resp *http.Response) (string, error) {
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == 200 {
 		body, err := ioutil.ReadAll(resp.Body)
 		if err != nil {
@@ -197,7 +207,9 @@ func baseUrl(protocol string) string {
 }
 
 func createSession() {
-	name, err := uuid.NewV4()
+	ctx := context.Background()
+
+	name, err := uuid.NewRandom()
 	if err != nil {
 		panic(err)
 	}
@@ -216,10 +228,12 @@ func createSession() {
 	}
 	fmt.Println(body)
 
-	conn, err := websocket.Dial(baseUrl("ws")+"/"+name.String(), "", baseUrl("http"))
+	wsConn, _, err := websocket.Dial(ctx, baseUrl("ws")+"/"+name.String(), nil)
 	if err != nil {
 		panic(err)
 	}
+	conn := websocket.NetConn(ctx, wsConn, msgType)
+
 	cols, err := term.Cols()
 	if err != nil {
 		panic(err)
@@ -237,7 +251,7 @@ func createSession() {
 		"COLUMNS=" + strconv.Itoa(cols),
 		"LINES=" + strconv.Itoa(lines),
 	}
-	pty, err := pty.Start(cmd)
+	ptyF, err := pty.Start(cmd)
 	if err != nil {
 		panic(err)
 	}
@@ -254,21 +268,20 @@ func createSession() {
 	defer term.Restore(os.Stdin)
 	eof := make(chan bool, 1)
 	go func() {
-		io.Copy(io.MultiWriter(os.Stdout, conn), pty)
+		io.Copy(io.MultiWriter(os.Stdout, conn), ptyF)
 		eof <- true
 	}()
 	go func() {
-		io.Copy(pty, os.Stdin)
+		io.Copy(ptyF, os.Stdin)
 		eof <- true
 	}()
 	go func() {
-		io.Copy(pty, conn)
+		io.Copy(ptyF, conn)
 		eof <- true
 	}()
 	go func() {
 		for {
-			_, err := conn.Write([]byte("\x00"))
-			if err != nil {
+			if _, err := conn.Write([]byte("\x00")); err != nil {
 				return
 			}
 			time.Sleep(10 * time.Second)
@@ -278,23 +291,27 @@ func createSession() {
 }
 
 func joinSession(sessionUrl string) {
-	url, err := url.Parse(sessionUrl)
+	ctx := context.Background()
+
+	pUrl, err := url.Parse(sessionUrl)
 	if err != nil {
 		log.Fatal(err)
 	}
-	if !strings.Contains(url.Host, ":") {
+	if !strings.Contains(pUrl.Host, ":") {
 		if *notls {
-			*server = url.Host + ":80"
+			*server = pUrl.Host + ":80"
 		} else {
-			*server = url.Host + ":443"
+			*server = pUrl.Host + ":443"
 		}
 	} else {
-		*server = url.Host
+		*server = pUrl.Host
 	}
-	conn, err := websocket.Dial(baseUrl("ws")+url.Path, "", baseUrl("http"))
+	wsConn, _, err := websocket.Dial(ctx, baseUrl("ws")+pUrl.Path, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
+	conn := websocket.NetConn(ctx, wsConn, msgType)
+
 	if err := term.MakeRaw(os.Stdin); err != nil {
 		log.Fatal(err)
 	}
@@ -366,11 +383,16 @@ func startDaemon() {
 			isWebsocket := r.Header.Get("Upgrade") == "websocket"
 			switch {
 			case session.Pilot == nil && isWebsocket:
-				websocket.Handler(func(conn *websocket.Conn) {
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					wsConn, err := websocket.Accept(w, r, nil)
+					if err != nil {
+						return
+					}
+					conn := websocket.NetConn(r.Context(), wsConn, msgType)
+
 					session.Pilot = conn
 					log.Println(sessionName + ": pilot connected")
-					_, err := io.Copy(io.MultiWriter(session.Viewers, session.CopilotBuffer), session.Pilot)
-					if err != nil {
+					if _, err := io.Copy(io.MultiWriter(session.Viewers, session.CopilotBuffer), session.Pilot); err != nil {
 						if err == io.EOF {
 							close(session.EOF)
 						} else {
@@ -378,8 +400,15 @@ func startDaemon() {
 						}
 					}
 				}).ServeHTTP(w, r)
+
 			case session.Pilot != nil && session.Copilot == nil && session.AllowCopilot && isWebsocket:
-				websocket.Handler(func(conn *websocket.Conn) {
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					wsConn, err := websocket.Accept(w, r, nil)
+					if err != nil {
+						return
+					}
+					conn := websocket.NetConn(r.Context(), wsConn, msgType)
+
 					session.Copilot = conn
 					session.CopilotBuffer.w = conn
 					session.Pilot.Write([]byte("\x07")) // ding!
@@ -393,9 +422,16 @@ func startDaemon() {
 					}()
 					<-eof
 				}).ServeHTTP(w, r)
+
 			case session.Pilot != nil && !session.Private:
 				if isWebsocket {
-					websocket.Handler(func(conn *websocket.Conn) {
+					http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						wsConn, err := websocket.Accept(w, r, nil)
+						if err != nil {
+							return
+						}
+						conn := websocket.NetConn(r.Context(), wsConn, msgType)
+
 						session.Viewers.Add(conn)
 						log.Println(sessionName + ": viewer connected [websocket]")
 						<-session.EOF
